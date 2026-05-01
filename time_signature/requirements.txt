@@ -1,0 +1,9 @@
+yt-dlp>=2024.1.0
+librosa>=0.10.1
+numpy>=1.24
+soundfile>=0.12.1
+tensorflow>=2.13
+tensorflow-hub>=0.15.0
+# tensorflow-hub still imports pkg_resources, which setuptools 81 dropped
+# from the default install. Pin until tf-hub publishes a fixed release.
+setuptools<81
