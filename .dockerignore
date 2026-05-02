@@ -1,0 +1,22 @@
+# Build context is the repo root for the api/Dockerfile.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/venv
+**/.venv
+**/env
+**/.env
+**/.env.*
+**/.git
+**/.gitignore
+**/.idea
+**/.vscode
+**/.DS_Store
+**/tests
+**/db.sqlite3
+**/staticfiles
+api/.dockerignore
+api/Dockerfile

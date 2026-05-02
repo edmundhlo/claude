@@ -1,0 +1,35 @@
+# --- web framework ---
+Django>=5.0,<6.0
+djangorestframework>=3.15
+gunicorn>=21.2
+
+# --- Postgres / Cloud SQL ---
+psycopg[binary]>=3.1
+
+# --- eodhd module deps ---
+requests>=2.31
+
+# --- time_signature module deps ---
+yt-dlp>=2024.1.0
+librosa>=0.10.1
+numpy>=1.24
+soundfile>=0.12.1
+tensorflow>=2.13
+tensorflow-hub>=0.15.0
+# tensorflow-hub still imports pkg_resources, which setuptools 81 dropped
+# from the default install. Pin until tf-hub publishes a fixed release.
+setuptools<81
+
+# Madmom (used when backend="madmom").
+#
+# madmom 0.16.1 (2018) ships limited wheels and its setup.py needs Cython +
+# numpy already importable at build time, so it can't be installed as a normal
+# entry in this file — pip's build isolation hides them from the build env.
+# Cython is listed here so the venv has it; the Dockerfile then runs:
+#
+#     pip install --no-build-isolation madmom
+#
+# as a follow-on step. Any environment installing this requirements.txt for
+# `backend="madmom"` support must do the same extra step.
+Cython>=0.29
+# madmom>=0.16.1   <-- intentionally not pip-installable from this file
