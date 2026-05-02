@@ -68,13 +68,49 @@ def test_too_few_beats_raises():
         estimate_meter(audio, SR)
 
 
-def test_madmom_backend_not_yet_available():
+def test_unknown_backend_rejected():
+    audio = _click_track(4)
+    with pytest.raises(ValueError):
+        estimate_meter(audio, SR, backend="acme")  # type: ignore[arg-type]
+
+
+def test_madmom_backend_raises_if_not_installed(monkeypatch):
+    """If the madmom import fails, the backend surfaces BackendNotAvailableError."""
+    import sys
+
+    # Hide every madmom submodule so the import inside _estimate_madmom fails.
+    for mod_name in list(sys.modules):
+        if mod_name == "madmom" or mod_name.startswith("madmom."):
+            monkeypatch.setitem(sys.modules, mod_name, None)
+
     audio = _click_track(4)
     with pytest.raises(BackendNotAvailableError):
         estimate_meter(audio, SR, backend="madmom")
 
 
-def test_unknown_backend_rejected():
-    audio = _click_track(4)
-    with pytest.raises(ValueError):
-        estimate_meter(audio, SR, backend="acme")  # type: ignore[arg-type]
+# Try a lightweight import probe; if madmom can't be imported (even with shims),
+# skip the smoke test rather than fail the whole suite.
+try:
+    from time_signature.meter import _apply_madmom_compat_shims as _shim
+    _shim()
+    import madmom as _madmom  # noqa: F401
+    _MADMOM_AVAILABLE = True
+except Exception:
+    _MADMOM_AVAILABLE = False
+
+
+@pytest.mark.skipif(not _MADMOM_AVAILABLE, reason="madmom not importable")
+def test_madmom_backend_runs_on_click_track():
+    """Smoke test: madmom backend produces a valid MeterResult on synthetic
+    audio. We don't assert on the meter value because madmom's RNN was trained
+    on real music and is not reliable on bare clicks — just check the plumbing.
+    """
+    audio = _click_track(4, bars=8)
+    # madmom expects 44.1kHz; the backend resamples internally.
+    result = estimate_meter(audio, SR, backend="madmom")
+
+    assert result.backend == "madmom"
+    assert result.beats_per_bar in (2, 3, 4)
+    assert result.time_signature == f"{result.beats_per_bar}/4"
+    # tempo should be in a plausible range for a 120 bpm input
+    assert 60.0 < result.tempo_bpm < 240.0

@@ -7,3 +7,16 @@ tensorflow-hub>=0.15.0
 # tensorflow-hub still imports pkg_resources, which setuptools 81 dropped
 # from the default install. Pin until tf-hub publishes a fixed release.
 setuptools<81
+
+# Optional: madmom backend for higher-accuracy meter detection.
+#
+# madmom 0.16.1 (2018) is unmaintained and pre-dates Python 3.10 / NumPy 2.x.
+# We work around its incompatibilities at runtime in meter._estimate_madmom.
+# Install separately if you want backend="madmom":
+#
+#     pip install Cython numpy
+#     pip install --no-build-isolation madmom
+#
+# The two-step install is required because madmom's setup.py needs Cython
+# and NumPy already installed when pip builds the wheel.
+# madmom>=0.16.1

@@ -9,14 +9,19 @@ Two backends are exposed:
   beat-tracking phase errors. Cannot resolve compound meters such as 6/8 —
   they typically read as 3/4 or 4/4.
 
-* ``"madmom"``: stub for a future implementation backed by madmom's RNN/DBN
-  downbeat tracker. Raises ``BackendNotAvailableError`` for now.
+* ``"madmom"``: madmom's pre-trained RNN downbeat activation network feeding
+  a Dynamic Bayesian Network downbeat tracker. More accurate on real music
+  than the librosa heuristic. Requires the ``madmom`` package; raises
+  :class:`BackendNotAvailableError` if not importable. madmom 0.16.1 has
+  several Python 3.10+ / NumPy 2.x incompatibilities that are worked around
+  at runtime — see :func:`_apply_madmom_compat_shims`.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import Iterator, Literal
 
 import numpy as np
 
@@ -46,9 +51,7 @@ def estimate_meter(
     if backend == "librosa":
         return _estimate_librosa(audio, sr)
     if backend == "madmom":
-        raise BackendNotAvailableError(
-            "the madmom backend is not implemented yet; use backend='librosa'"
-        )
+        return _estimate_madmom(audio, sr)
     raise ValueError(f"unknown backend: {backend!r}")
 
 
@@ -92,6 +95,163 @@ def _estimate_librosa(audio: np.ndarray, sr: int) -> MeterResult:
         backend="librosa",
         candidate_scores=candidate_scores,
     )
+
+
+# --------------------------------------------------------------- madmom backend
+#
+# madmom 0.16.1 (2018) is the most recent release and is unmaintained. It does
+# not officially support Python 3.10+ or NumPy 1.24+. Two issues bite us:
+#
+#   1. ``from collections import MutableSequence`` (and friends) — these moved
+#      to ``collections.abc`` in Python 3.3 and were removed from
+#      ``collections`` in Python 3.10.
+#
+#   2. Use of removed NumPy aliases ``np.float`` / ``np.int`` / ``np.bool`` /
+#      ``np.object``, plus a ``np.asarray(...)[:, 1]`` pattern in the DBN
+#      downbeat tracker that NumPy 2.x rejects when the inner sequences have
+#      mismatched shapes.
+#
+# Rather than patch madmom on disk (brittle — undone by ``pip install --upgrade``)
+# we apply the fixes at runtime, scoped to the call. The shim functions below
+# are idempotent and only run when the madmom backend is invoked.
+
+# Compatibility tables — single source of truth so the shim can also report
+# what it patched if someone needs to debug.
+_COLLECTIONS_ABC_NAMES = (
+    "MutableSequence",
+    "MutableMapping",
+    "Iterable",
+    "Callable",
+    "Mapping",
+    "Hashable",
+    "Sequence",
+)
+_NUMPY_ALIASES: tuple[tuple[str, type], ...] = (
+    ("float", float),
+    ("int", int),
+    ("bool", bool),
+    ("object", object),
+    ("complex", complex),
+)
+
+
+def _apply_madmom_compat_shims() -> None:
+    """Re-inject names that Python 3.10+ / NumPy 2.x removed but madmom still uses."""
+    import collections
+    import collections.abc
+
+    for name in _COLLECTIONS_ABC_NAMES:
+        if not hasattr(collections, name):
+            setattr(collections, name, getattr(collections.abc, name))
+
+    for alias, target in _NUMPY_ALIASES:
+        if not hasattr(np, alias):
+            setattr(np, alias, target)
+
+
+@contextmanager
+def _allow_inhomogeneous_asarray() -> Iterator[None]:
+    """Patch :func:`numpy.asarray` to fall back to ``dtype=object`` for sequences
+    whose inner shapes don't match. Required for madmom's DBN tracker, which
+    builds an array of ``(path, log_likelihood)`` tuples where ``path`` has
+    variable length per HMM. NumPy 2.x rejects this without an explicit dtype.
+    """
+    original = np.asarray
+
+    def _patched(a, *args, **kwargs):
+        try:
+            return original(a, *args, **kwargs)
+        except ValueError as e:
+            if "inhomogeneous" in str(e):
+                return original(a, dtype=object)
+            raise
+
+    np.asarray = _patched
+    try:
+        yield
+    finally:
+        np.asarray = original
+
+
+# madmom's pre-trained downbeat RNN was trained on this rate.
+_MADMOM_SAMPLE_RATE = 44100
+_MADMOM_FPS = 100  # frames per second the RNN/DBN operate on
+
+
+def _estimate_madmom(audio: np.ndarray, sr: int) -> MeterResult:
+    """Estimate meter via madmom's RNN downbeat activations + DBN tracker."""
+    if audio.ndim != 1:
+        raise MeterDetectionError(f"expected mono audio, got shape {audio.shape}")
+    if audio.size < sr:
+        raise MeterDetectionError("audio is too short to estimate a meter (need >= 1s)")
+
+    _apply_madmom_compat_shims()
+
+    try:
+        from madmom.audio.signal import Signal
+        from madmom.features.downbeats import (
+            DBNDownBeatTrackingProcessor,
+            RNNDownBeatProcessor,
+        )
+    except ImportError as e:
+        raise BackendNotAvailableError(
+            "the madmom backend requires `pip install madmom` (and a build env "
+            "with Cython available)."
+        ) from e
+
+    # madmom's RNN is hard-wired to 44.1kHz; resample if needed.
+    if sr != _MADMOM_SAMPLE_RATE:
+        try:
+            import librosa
+        except ImportError as e:
+            raise MeterDetectionError(
+                "librosa is required to resample input for the madmom backend"
+            ) from e
+        audio = librosa.resample(
+            audio.astype(np.float32),
+            orig_sr=sr,
+            target_sr=_MADMOM_SAMPLE_RATE,
+        )
+
+    sig = Signal(audio, sample_rate=_MADMOM_SAMPLE_RATE)
+    activations = RNNDownBeatProcessor()(sig)
+    tracker = DBNDownBeatTrackingProcessor(
+        beats_per_bar=list(_METER_CANDIDATES), fps=_MADMOM_FPS
+    )
+
+    with _allow_inhomogeneous_asarray():
+        beats = tracker(activations)
+
+    if len(beats) == 0:
+        raise MeterDetectionError("madmom found no beats in the input")
+
+    positions = beats[:, 1].astype(int)
+    bpb = int(positions.max())
+    if bpb < 2:
+        raise MeterDetectionError(
+            f"madmom returned implausible beats-per-bar: {bpb}"
+        )
+
+    times = beats[:, 0]
+    if len(times) >= 2:
+        beat_intervals = np.diff(times)
+        median_interval = float(np.median(beat_intervals))
+        tempo = 60.0 / median_interval if median_interval > 0 else float("nan")
+    else:
+        tempo = float("nan")
+
+    return MeterResult(
+        beats_per_bar=bpb,
+        time_signature=f"{bpb}/4",
+        tempo_bpm=tempo,
+        backend="madmom",
+        # madmom's DBN tracker doesn't expose per-candidate likelihoods through
+        # its public API, so we leave this empty rather than fabricating one.
+        candidate_scores={},
+    )
+
+
+# ----------------------------------------------------------- librosa internals
 
 
 def _score_meters(beat_strengths: np.ndarray) -> dict[int, float]:
