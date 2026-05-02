@@ -23,7 +23,11 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# SQLite (local-only Django dev fallback when no Cloud SQL is configured)
+*.sqlite3
